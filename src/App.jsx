@@ -559,8 +559,30 @@ function RoomChoresModal({ room, chores, isDoneToday, toggleDoneToday, toggleSta
         zIndex: 50,
         padding: 16,
         boxSizing: "border-box",
+        perspective: "900px",
+        animation: "roomModalBackdropFade 0.2s ease",
       }}
     >
+      <style>{`
+        @keyframes roomModalBackdropFade {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes roomModalFlipIn {
+          0% {
+            opacity: 0;
+            transform: rotateX(-70deg) scale(0.92) translateY(10px);
+          }
+          55% {
+            opacity: 1;
+            transform: rotateX(9deg) scale(1.015) translateY(0);
+          }
+          100% {
+            opacity: 1;
+            transform: rotateX(0deg) scale(1) translateY(0);
+          }
+        }
+      `}</style>
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
@@ -573,6 +595,8 @@ function RoomChoresModal({ room, chores, isDoneToday, toggleDoneToday, toggleSta
           boxShadow: "0 12px 40px rgba(11,61,92,0.30)",
           display: "flex",
           flexDirection: "column",
+          transformOrigin: "center top",
+          animation: "roomModalFlipIn 0.32s cubic-bezier(.25,.9,.35,1) both",
         }}
       >
         <div
