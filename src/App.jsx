@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { supabase } from "./supabaseClient";
+import Auth from "./Auth";
 
 const COLORS = {
   dark: "#0B3D5C",
@@ -13,8 +15,6 @@ const COLORS = {
   card: "#ffffff",
   chip: "#F1F9FC",
 };
-
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 const playChime = () => {
   try {
@@ -69,18 +69,10 @@ const last7Days = () => {
 };
 
 export default function ChoreTracker() {
-  const [rooms, setRooms] = useState(() => {
-    const saved = localStorage.getItem("chore-rooms");
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [chores, setChores] = useState(() => {
-    const saved = localStorage.getItem("chore-list");
-    return saved ? JSON.parse(saved) : [];
-  });
-  const [completions, setCompletions] = useState(() => {
-    const saved = localStorage.getItem("chore-completions");
-    return saved ? JSON.parse(saved) : [];
-  });
+  const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
+  const [rooms, setRooms] = useState([]);
+  const [chores, setChores] = useState([]);
+  const [completions, setCompletions] = useState([]);
 
   const [tab, setTab] = useState("chores");
   const [sortMode, setSortMode] = useState("date");
@@ -95,69 +87,114 @@ export default function ChoreTracker() {
 
   const today = todayKey();
 
+  // Track sign-in state
   useEffect(() => {
-    localStorage.setItem("chore-rooms", JSON.stringify(rooms));
-  }, [rooms]);
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, sess) => {
+      setSession(sess);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
 
+  // Load data once signed in, and keep every device in sync live
   useEffect(() => {
-    localStorage.setItem("chore-list", JSON.stringify(chores));
-  }, [chores]);
+    if (!session) return;
+    let active = true;
 
-  useEffect(() => {
-    localStorage.setItem("chore-completions", JSON.stringify(completions));
-  }, [completions]);
+    const loadAll = async () => {
+      const [roomsRes, choresRes, completionsRes] = await Promise.all([
+        supabase.from("rooms").select("*").order("created_at"),
+        supabase.from("chores").select("*").order("created_at"),
+        supabase.from("completions").select("*"),
+      ]);
+      if (!active) return;
+      if (roomsRes.data) setRooms(roomsRes.data.map((r) => ({ id: r.id, name: r.name })));
+      if (choresRes.data)
+        setChores(
+          choresRes.data.map((c) => ({
+            id: c.id,
+            name: c.name,
+            roomId: c.room_id,
+            starred: c.starred,
+          }))
+        );
+      if (completionsRes.data)
+        setCompletions(
+          completionsRes.data.map((c) => ({
+            id: c.id,
+            choreId: c.chore_id,
+            date: c.date,
+            completedBy: c.completed_by_name,
+          }))
+        );
+    };
+
+    loadAll();
+
+    const channel = supabase
+      .channel("chore-tracker-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "rooms" }, loadAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "chores" }, loadAll)
+      .on("postgres_changes", { event: "*", schema: "public", table: "completions" }, loadAll)
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, [session]);
 
   useEffect(() => {
     if (!newChoreRoom && rooms.length > 0) setNewChoreRoom(rooms[0].id);
   }, [rooms, newChoreRoom]);
 
-  const addRoom = () => {
+  const currentName = () =>
+    session?.user?.user_metadata?.full_name || session?.user?.email || "Someone";
+  const currentEmail = () => session?.user?.email || "";
+
+  const addRoom = async () => {
     const name = newRoomName.trim();
     if (!name) return;
-    setRooms((prev) => [...prev, { id: uid(), name }]);
     setNewRoomName("");
+    await supabase.from("rooms").insert({ name });
   };
 
-  const deleteRoom = (roomId) => {
-    const choreIds = chores.filter((c) => c.roomId === roomId).map((c) => c.id);
-    setChores((prev) => prev.filter((c) => c.roomId !== roomId));
-    setCompletions((prev) => prev.filter((c) => !choreIds.includes(c.choreId)));
-    setRooms((prev) => prev.filter((r) => r.id !== roomId));
+  const deleteRoom = async (roomId) => {
     setConfirmDeleteRoom(null);
     setViewRoomId((v) => (v === roomId ? null : v));
+    await supabase.from("rooms").delete().eq("id", roomId);
   };
 
-  const addChore = () => {
+  const addChore = async () => {
     const name = newChoreName.trim();
     if (!name || !newChoreRoom) return;
-    setChores((prev) => [
-      ...prev,
-      { id: uid(), name, roomId: newChoreRoom, starred: false },
-    ]);
     setNewChoreName("");
+    await supabase.from("chores").insert({ name, room_id: newChoreRoom, starred: false });
   };
 
-  const toggleStar = (choreId) => {
-    setChores((prev) =>
-      prev.map((c) => (c.id === choreId ? { ...c, starred: !c.starred } : c))
-    );
+  const toggleStar = async (choreId) => {
+    const chore = chores.find((c) => c.id === choreId);
+    if (!chore) return;
+    await supabase.from("chores").update({ starred: !chore.starred }).eq("id", choreId);
   };
 
-  const deleteChore = (choreId) => {
-    setChores((prev) => prev.filter((c) => c.id !== choreId));
-    setCompletions((prev) => prev.filter((c) => c.choreId !== choreId));
+  const deleteChore = async (choreId) => {
+    await supabase.from("chores").delete().eq("id", choreId);
   };
 
   const isDoneToday = (choreId) =>
     completions.some((c) => c.choreId === choreId && c.date === today);
 
-  const toggleDoneToday = (choreId) => {
+  const toggleDoneToday = async (choreId) => {
     if (isDoneToday(choreId)) {
-      setCompletions((prev) =>
-        prev.filter((c) => !(c.choreId === choreId && c.date === today))
-      );
+      await supabase.from("completions").delete().eq("chore_id", choreId).eq("date", today);
     } else {
-      setCompletions((prev) => [...prev, { id: uid(), choreId, date: today }]);
+      await supabase.from("completions").insert({
+        chore_id: choreId,
+        date: today,
+        completed_by_name: currentName(),
+        completed_by_email: currentEmail(),
+      });
       const chore = chores.find((c) => c.id === choreId);
       if (chore && chore.starred) {
         playChime();
@@ -195,6 +232,7 @@ export default function ChoreTracker() {
       date: c.date,
       choreName: chore ? chore.name : "(deleted chore)",
       roomName: chore ? roomName(chore.roomId) : "—",
+      completedBy: c.completedBy,
     };
   });
   if (dayFilter) historyRows = historyRows.filter((r) => r.date === dayFilter);
@@ -210,6 +248,28 @@ export default function ChoreTracker() {
     room,
     chores: chores.filter((c) => c.roomId === room.id),
   }));
+
+  if (session === undefined) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          background: `linear-gradient(180deg, ${COLORS.bgTop} 0%, ${COLORS.bgBottom} 100%)`,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: COLORS.muted,
+          fontFamily: "'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
+        }}
+      >
+        Loading…
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <Auth />;
+  }
 
   return (
     <div
@@ -247,6 +307,32 @@ export default function ChoreTracker() {
           >
             Chore Tracker
           </h1>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginTop: 6,
+            }}
+          >
+            <span style={{ fontSize: 12, color: COLORS.muted, fontWeight: 600 }}>
+              Signed in as {currentName()}
+            </span>
+            <button
+              onClick={() => supabase.auth.signOut()}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: COLORS.mutedLight,
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              Sign out
+            </button>
+          </div>
         </div>
 
         {tab === "rooms" && (
@@ -1012,6 +1098,7 @@ function HistoryTab({
                 }}
               >
                 {row.roomName}
+                {row.completedBy ? ` · ${row.completedBy}` : ""}
               </div>
             </div>
             <div style={{ fontSize: 12, color: COLORS.muted, fontWeight: 700, flexShrink: 0 }}>
